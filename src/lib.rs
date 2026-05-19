@@ -3,7 +3,7 @@ use zed_extension_api::{
     self as zed, settings::LspSettings, DownloadedFileType, LanguageServerId, Result,
 };
 
-const LSP_RELEASE_REPO: &str = "max-levitskiy/zed-extention-d2-viewer";
+const LSP_RELEASE_REPO: &str = "Max-Levitskiy/zed-extention-d2-viewer";
 
 struct D2Extension {
     cached_binary_path: Option<String>,
@@ -25,7 +25,7 @@ impl zed::Extension for D2Extension {
                     return Ok(zed::Command {
                         command: path,
                         args: binary.arguments.unwrap_or_default(),
-                        env: Default::default(),
+                        env: binary.env.map(|m| m.into_iter().collect()).unwrap_or_default(),
                     });
                 }
             }
@@ -81,6 +81,9 @@ impl D2Extension {
             &zed::LanguageServerInstallationStatus::Downloading,
         );
 
+        // Task 11's release workflow uploads raw binaries (not tarballs/zips),
+        // so Uncompressed is correct here. If the workflow ever switches to
+        // compressed assets, change this in lockstep.
         zed::download_file(&asset.download_url, &dest_path, DownloadedFileType::Uncompressed)
             .map_err(|e| format!("download {}: {e}", asset.download_url))?;
 
