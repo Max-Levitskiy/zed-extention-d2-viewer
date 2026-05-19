@@ -1,0 +1,15 @@
+id = "d2-viewer"
+name = "D2 Viewer"
+description = "Syntax highlighting and on-save SVG preview for D2 diagram files"
+version = "0.0.1"
+schema_version = 1
+authors = ["Max Levitskiy <max.dstu@gmail.com>"]
+repository = "https://github.com/max-levitskiy/zed-extention-d2-viewer"
+
+[language_servers.d2-lsp]
+name = "D2 Language Server"
+language = "D2"
+
+[grammars.d2]
+repository = "https://github.com/ravsii/tree-sitter-d2"
+commit = "200434618a6bede20ebd4982aa4d4f1edeb0b5c1"
