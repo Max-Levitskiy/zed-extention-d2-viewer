@@ -14,6 +14,9 @@
 
 # Local Zed dev install scratch
 /.zed/
+/extension.wasm
+/grammars/*.wasm
+/grammars/*/
 
 # Research artifacts from project ideation (knowledge graph + raw docs)
 /graphify-out/
