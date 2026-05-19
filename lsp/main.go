@@ -4,8 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/max-levitskiy/zed-extention-d2-viewer/lsp/internal/server"
 )
 
+// Version is a var (not const) so the release pipeline can rewrite it with
+// `-ldflags "-X main.Version=<tag>"` — `-X` only works on string vars.
 var Version = "0.0.0"
 
 func main() {
@@ -15,7 +19,8 @@ func main() {
 		fmt.Println(Version)
 		os.Exit(0)
 	}
-	// Full LSP loop wired in Task 6.
-	fmt.Fprintln(os.Stderr, "d2-lsp: LSP loop not yet wired (see Task 6)")
-	os.Exit(2)
+	if err := server.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "d2-lsp:", err)
+		os.Exit(1)
+	}
 }
