@@ -81,6 +81,11 @@ impl D2Extension {
             &zed::LanguageServerInstallationStatus::Downloading,
         );
 
+        // `zed::download_file` does not create parent directories — create the
+        // per-version cache dir before the download so the write doesn't ENOENT.
+        fs::create_dir_all(&dest_dir)
+            .map_err(|e| format!("mkdir {dest_dir}: {e}"))?;
+
         // Task 11's release workflow uploads raw binaries (not tarballs/zips),
         // so Uncompressed is correct here. If the workflow ever switches to
         // compressed assets, change this in lockstep.
