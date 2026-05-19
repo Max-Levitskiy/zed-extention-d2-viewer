@@ -1,0 +1,18 @@
+# Build outputs
+/target/
+/lsp/bin/
+/lsp/dist/
+
+# Editor caches
+.DS_Store
+*.swp
+
+# Rendered preview siblings (we never want these committed)
+.*.d2.svg
+
+# Local Zed dev install scratch
+/.zed/
+
+# Research artifacts from project ideation (knowledge graph + raw docs)
+/graphify-out/
+/raw/
