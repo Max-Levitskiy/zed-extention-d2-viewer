@@ -2,6 +2,8 @@
 /target/
 /lsp/bin/
 /lsp/dist/
+/lsp/lsp
+/lsp/lsp.exe
 
 # Editor caches
 .DS_Store
