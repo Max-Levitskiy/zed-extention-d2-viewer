@@ -215,3 +215,125 @@ func render_sibling(src string) string {
 	dir, base := filepath.Split(src)
 	return filepath.Join(dir, "."+base+".svg")
 }
+
+// TestIntegrationCodeAction drives the full code-action flow: initialize,
+// didOpen, didSave (to produce the sibling SVG), then textDocument/codeAction
+// (must include "Open D2 Preview"), then workspace/executeCommand for
+// d2.openPreview, and finally assert the server sends a window/showDocument
+// request targeting the sibling SVG URI.
+func TestIntegrationCodeAction(t *testing.T) {
+	bin := buildBinary(t)
+	workdir := t.TempDir()
+	src := filepath.Join(workdir, "hello.d2")
+	if err := os.WriteFile(src, []byte("hello -> world"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	cmd := exec.Command(bin)
+	cmd.Stderr = os.Stderr
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start lsp: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	rd := bufio.NewReader(stdout)
+	uri := pathToURI(src)
+	siblingURI := pathToURI(render_sibling(src))
+
+	send(t, stdin, "initialize", 1, map[string]any{
+		"processId":    os.Getpid(),
+		"rootUri":      pathToURI(workdir),
+		"capabilities": map[string]any{},
+	})
+	initResp := expectResponse(t, rd, 1)
+	result, _ := initResp["result"].(map[string]any)
+	caps, _ := result["capabilities"].(map[string]any)
+	if caps["codeActionProvider"] == nil {
+		t.Error("initialize response missing codeActionProvider")
+	}
+	if caps["executeCommandProvider"] == nil {
+		t.Error("initialize response missing executeCommandProvider")
+	}
+
+	sendNotify(t, stdin, "initialized", map[string]any{})
+	sendNotify(t, stdin, "textDocument/didOpen", map[string]any{
+		"textDocument": map[string]any{
+			"uri": uri, "languageId": "d2", "version": 1, "text": "hello -> world",
+		},
+	})
+	sendNotify(t, stdin, "textDocument/didSave", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"text":         "hello -> world",
+	})
+	// Wait until the sibling SVG exists, so the executeCommand path takes
+	// the showDocument branch (not the "save first" diagnostic branch).
+	waitForFile(t, render_sibling(src), 5*time.Second)
+
+	// Drain any in-flight notifications (publishDiagnostics) before the
+	// code action exchange.
+	send(t, stdin, "textDocument/codeAction", 2, map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"range": map[string]any{
+			"start": map[string]any{"line": 0, "character": 0},
+			"end":   map[string]any{"line": 0, "character": 0},
+		},
+		"context": map[string]any{"diagnostics": []any{}},
+	})
+	caResp := expectResponse(t, rd, 2)
+	caResult, _ := caResp["result"].([]any)
+	if len(caResult) == 0 {
+		t.Fatalf("expected at least one code action, got %v", caResp["result"])
+	}
+	first, _ := caResult[0].(map[string]any)
+	cmdEntry, _ := first["command"].(map[string]any)
+	if cmdEntry == nil || cmdEntry["command"] != "d2.openPreview" {
+		t.Fatalf("expected first code action command == d2.openPreview, got %v", first)
+	}
+
+	// Trigger executeCommand. The server will issue a window/showDocument
+	// request to us; we must respond with a result so the server's Call
+	// completes.
+	send(t, stdin, "workspace/executeCommand", 3, map[string]any{
+		"command":   "d2.openPreview",
+		"arguments": []any{uri},
+	})
+
+	// Loop reading messages until we see the server-initiated
+	// window/showDocument request. Respond to it, then look for the
+	// executeCommand response.
+	deadline := time.Now().Add(5 * time.Second)
+	sawShow := false
+	sawExecResp := false
+	for time.Now().Before(deadline) && !(sawShow && sawExecResp) {
+		msg, err := readMessage(rd)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if method, ok := msg["method"].(string); ok && method == "window/showDocument" {
+			sawShow = true
+			params, _ := msg["params"].(map[string]any)
+			if params["uri"] != siblingURI {
+				t.Errorf("showDocument uri = %v, want %v", params["uri"], siblingURI)
+			}
+			// Respond to the request so server's Call() returns.
+			if id, ok := msg["id"]; ok {
+				body, _ := json.Marshal(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      id,
+					"result":  map[string]any{"success": true},
+				})
+				fmt.Fprintf(stdin, "Content-Length: %d\r\n\r\n", len(body))
+				stdin.Write(body)
+			}
+			continue
+		}
+		if id, ok := msg["id"].(float64); ok && int(id) == 3 {
+			sawExecResp = true
+		}
+	}
+	if !sawShow {
+		t.Fatal("server never sent window/showDocument")
+	}
+}

@@ -6,8 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +25,14 @@ import (
 const lspName = "d2-lsp"
 const lspVersion = "0.0.0"
 
+// codeActionKindOpenD2Preview is the kind reported for our document-level
+// "Open D2 Preview" code action. Custom (non-standard) source action kind.
+const codeActionKindOpenD2Preview = "source.openD2Preview"
+
+// commandOpenD2Preview is the workspace/executeCommand identifier the
+// client invokes to request the server open the sibling SVG file.
+const commandOpenD2Preview = "d2.openPreview"
+
 // renderTimeout caps any single compile+render call. Exposed as a var so
 // integration tests can shorten it; not a user setting.
 var renderTimeout = 5 * time.Second
@@ -32,12 +43,20 @@ var renderTimeout = 5 * time.Second
 type ServerCaps struct {
 	TextDocumentSync             any
 	PublishDiagnosticsAdvertised bool
+	CodeActionProvider           any
+	ExecuteCommandProvider       *protocol.ExecuteCommandOptions
 }
 
 func Capabilities() ServerCaps {
 	return ServerCaps{
 		TextDocumentSync:             1, // Full
 		PublishDiagnosticsAdvertised: true,
+		CodeActionProvider: &protocol.CodeActionOptions{
+			CodeActionKinds: []protocol.CodeActionKind{codeActionKindOpenD2Preview},
+		},
+		ExecuteCommandProvider: &protocol.ExecuteCommandOptions{
+			Commands: []string{commandOpenD2Preview},
+		},
 	}
 }
 
@@ -98,6 +117,12 @@ func Run() error {
 		return protocol.InitializeResult{
 			Capabilities: protocol.ServerCapabilities{
 				TextDocumentSync: kind,
+				CodeActionProvider: &protocol.CodeActionOptions{
+					CodeActionKinds: []protocol.CodeActionKind{codeActionKindOpenD2Preview},
+				},
+				ExecuteCommandProvider: &protocol.ExecuteCommandOptions{
+					Commands: []string{commandOpenD2Preview},
+				},
 			},
 			ServerInfo: &protocol.InitializeResultServerInfo{
 				Name:    lspName,
@@ -134,8 +159,93 @@ func Run() error {
 		return handleSave(ctx, state, params)
 	}
 
+	handler.TextDocumentCodeAction = func(ctx *glsp.Context, params *protocol.CodeActionParams) (any, error) {
+		return handleCodeAction(params), nil
+	}
+	handler.WorkspaceExecuteCommand = func(ctx *glsp.Context, params *protocol.ExecuteCommandParams) (any, error) {
+		return handleExecuteCommand(ctx, params)
+	}
+
 	srv := glspserver.NewServer(&handler, lspName, false)
 	return srv.RunStdio()
+}
+
+// handleCodeAction returns the single document-level "Open D2 Preview"
+// code action. We return it unconditionally so users can trigger it from
+// anywhere in the document; if the client narrowed by kind via
+// params.Context.Only, respect that filter.
+func handleCodeAction(params *protocol.CodeActionParams) []protocol.CodeAction {
+	if len(params.Context.Only) > 0 {
+		want := false
+		for _, k := range params.Context.Only {
+			// Allow exact match, or a hierarchical prefix match (e.g. "source").
+			if k == codeActionKindOpenD2Preview || strings.HasPrefix(codeActionKindOpenD2Preview, k+".") || k == "source" && strings.HasPrefix(codeActionKindOpenD2Preview, "source.") {
+				want = true
+				break
+			}
+		}
+		if !want {
+			return nil
+		}
+	}
+	kind := protocol.CodeActionKind(codeActionKindOpenD2Preview)
+	return []protocol.CodeAction{{
+		Title: "Open D2 Preview",
+		Kind:  &kind,
+		Command: &protocol.Command{
+			Title:     "Open D2 Preview",
+			Command:   commandOpenD2Preview,
+			Arguments: []any{params.TextDocument.URI},
+		},
+	}}
+}
+
+// handleExecuteCommand dispatches workspace/executeCommand. For
+// "d2.openPreview" it computes the sibling SVG path and asks the client
+// to open it via window/showDocument.
+func handleExecuteCommand(glspCtx *glsp.Context, params *protocol.ExecuteCommandParams) (any, error) {
+	if params.Command != commandOpenD2Preview {
+		return nil, nil
+	}
+	if len(params.Arguments) < 1 {
+		return nil, nil
+	}
+	uri, ok := params.Arguments[0].(string)
+	if !ok {
+		return nil, nil
+	}
+	sourcePath, err := uriToPath(uri)
+	if err != nil {
+		publishGenericDiag(glspCtx, uri, err.Error())
+		return nil, nil
+	}
+	siblingPath := render.SiblingPath(sourcePath)
+	if _, statErr := os.Stat(siblingPath); statErr != nil {
+		if errors.Is(statErr, fs.ErrNotExist) {
+			publishGenericDiag(glspCtx, uri, "Save the file to generate the preview")
+			return nil, nil
+		}
+		publishGenericDiag(glspCtx, uri, "stat sibling svg: "+statErr.Error())
+		return nil, nil
+	}
+	siblingURI := pathToFileURI(siblingPath)
+	takeFocus := true
+	// Issue the showDocument request asynchronously: the jsonrpc2 read
+	// loop in glsp runs handlers synchronously, so calling Call here on
+	// the same goroutine would deadlock waiting for the client's reply
+	// (the reply can't be processed until this handler returns).
+	go glspCtx.Call(protocol.ServerWindowShowDocument, protocol.ShowDocumentParams{
+		URI:       siblingURI,
+		TakeFocus: &takeFocus,
+	}, &protocol.ShowDocumentResult{})
+	return nil, nil
+}
+
+// pathToFileURI converts a filesystem path to a file:// URI suitable for
+// window/showDocument.
+func pathToFileURI(p string) string {
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(p)}
+	return u.String()
 }
 
 func handleSave(glspCtx *glsp.Context, state *State, params *protocol.DidSaveTextDocumentParams) error {
