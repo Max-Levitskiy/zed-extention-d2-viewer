@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -65,6 +66,10 @@ func (s *State) Get(uri string) (string, bool) {
 	return t, ok
 }
 
+// Drop removes the per-URI document text and lock entry. Callers that
+// already hold a lock pointer obtained from Lock(uri) keep using it
+// safely until they release it; a subsequent Lock(uri) will return a
+// fresh, distinct mutex.
 func (s *State) Drop(uri string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -117,7 +122,7 @@ func Run() error {
 		case protocol.TextDocumentContentChangeEventWhole:
 			state.Set(params.TextDocument.URI, c.Text)
 		case protocol.TextDocumentContentChangeEvent:
-			state.Set(params.TextDocument.URI, c.Text)
+			return fmt.Errorf("incremental sync not supported (server advertises Full only)")
 		}
 		return nil
 	}
@@ -154,8 +159,9 @@ func handleSave(glspCtx *glsp.Context, state *State, params *protocol.DidSaveTex
 		return nil
 	}
 
-	state.Lock(uri).Lock()
-	defer state.Lock(uri).Unlock()
+	lk := state.Lock(uri)
+	lk.Lock()
+	defer lk.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), renderTimeout)
 	defer cancel()
@@ -236,9 +242,5 @@ func toProtocolDiags(in []diag.Diagnostic) []protocol.Diagnostic {
 }
 
 func asCE(err error, out *render.CompileError) bool {
-	if ce, ok := err.(render.CompileError); ok {
-		*out = ce
-		return true
-	}
-	return false
+	return errors.As(err, out)
 }
