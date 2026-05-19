@@ -29,7 +29,7 @@ type CompileError struct {
 }
 
 func (e CompileError) Error() string {
-	return fmt.Sprintf("d2 compile error at %d:%d: %s", e.Line, e.Column, e.Message)
+	return fmt.Sprintf("d2 compile error: %s", e.Message)
 }
 
 // Render compiles `text` and returns SVG bytes. On compile failure it
@@ -86,6 +86,8 @@ func toCompileError(err error) error {
 			Message: first.Message,
 		}
 	}
+	// Defensive: handles re-entry where a caller passes an already-shaped
+	// CompileError (d2 itself does not produce this type).
 	var ce CompileError
 	if errors.As(err, &ce) {
 		return ce
