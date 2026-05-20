@@ -220,8 +220,14 @@ func render_sibling(src string) string {
 // didOpen, then textDocument/codeAction (must include "Open D2 Preview"),
 // then workspace/executeCommand for d2.openPreview. The server is expected
 // to render the current in-memory text on demand, write the sibling SVG,
-// and issue a window/showDocument request targeting the sibling URI —
-// without requiring a prior didSave.
+// and — when the Zed CLI cannot be located — issue a window/showDocument
+// request targeting the sibling URI as a fallback, all without requiring
+// a prior didSave.
+//
+// The test forces the showDocument fallback by exporting ZED_CLI_DISABLE=1
+// to the spawned LSP subprocess. The server treats that flag as "pretend
+// there is no Zed CLI available" so we deterministically exercise the
+// fallback path regardless of the developer's local environment.
 func TestIntegrationCodeAction(t *testing.T) {
 	bin := buildBinary(t)
 	workdir := t.TempDir()
@@ -231,6 +237,7 @@ func TestIntegrationCodeAction(t *testing.T) {
 	}
 
 	cmd := exec.Command(bin)
+	cmd.Env = append(os.Environ(), "ZED_CLI_DISABLE=1")
 	cmd.Stderr = os.Stderr
 	stdin, _ := cmd.StdinPipe()
 	stdout, _ := cmd.StdoutPipe()

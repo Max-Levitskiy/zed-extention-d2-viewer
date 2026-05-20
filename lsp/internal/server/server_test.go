@@ -1,6 +1,8 @@
 package server
 
 import (
+	"os/exec"
+	"runtime"
 	"testing"
 
 	protocol "github.com/tliron/glsp/protocol_3_16"
@@ -86,5 +88,48 @@ func TestCodeActionFiltersByOnly(t *testing.T) {
 	got = handleCodeAction(params)
 	if len(got) != 1 {
 		t.Errorf("expected 1 action when filtered to source, got %d", len(got))
+	}
+}
+
+// TestOpenInZedSpawnPath verifies the happy path: when a usable CLI is
+// available, openInZed spawns it and does NOT fall back to showDocument.
+// We stub zedCLIPathFn to point at /usr/bin/true (Unix) which exits
+// immediately — the test asserts spawn succeeds without hanging.
+func TestOpenInZedSpawnPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no /usr/bin/true on Windows; spawn path is exercised on Unix CI")
+	}
+	stub, err := exec.LookPath("true")
+	if err != nil {
+		t.Skipf("no `true` binary on PATH: %v", err)
+	}
+
+	old := zedCLIPathFn
+	zedCLIPathFn = func() string { return stub }
+	t.Cleanup(func() { zedCLIPathFn = old })
+
+	// glspCtx is unused on the spawn path (no showDocument fallback). Passing
+	// nil would panic only if we hit the fallback — which we shouldn't.
+	openInZed(nil, "file:///tmp/dummy.d2", "/tmp/dummy.d2.svg")
+	// If we got here without hanging or panicking, the spawn-and-detach
+	// path executed successfully.
+}
+
+// TestZedCLIPathDisable confirms ZED_CLI_DISABLE short-circuits CLI
+// discovery, which is how the integration test forces the fallback path
+// in a cross-environment-safe way.
+func TestZedCLIPathDisable(t *testing.T) {
+	t.Setenv("ZED_CLI_DISABLE", "1")
+	if got := zedCLIPath(); got != "" {
+		t.Fatalf("zedCLIPath() with ZED_CLI_DISABLE=1 = %q, want \"\"", got)
+	}
+}
+
+// TestZedCLIPathEnvOverride confirms $ZED_CLI is honored when set.
+func TestZedCLIPathEnvOverride(t *testing.T) {
+	t.Setenv("ZED_CLI_DISABLE", "")
+	t.Setenv("ZED_CLI", "/opt/zed/bin/zed")
+	if got := zedCLIPath(); got != "/opt/zed/bin/zed" {
+		t.Fatalf("zedCLIPath() with ZED_CLI=/opt/zed/bin/zed = %q", got)
 	}
 }

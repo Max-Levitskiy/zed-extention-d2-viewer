@@ -6,7 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -251,17 +254,90 @@ func handleExecuteCommand(glspCtx *glsp.Context, state *State, params *protocol.
 	}
 	publishDiagnostics(glspCtx, uri, nil) // clear stale errors on successful render
 
-	siblingURI := pathToFileURI(siblingPath)
+	openInZed(glspCtx, uri, siblingPath)
+	return nil, nil
+}
+
+// zedCLIPathFn is overridable in tests to deterministically force the
+// showDocument fallback path (or to point at a harmless stub binary).
+var zedCLIPathFn = zedCLIPath
+
+// openInZed asks Zed to open `targetPath` in a pane. It prefers spawning
+// the local `zed` CLI (which natively renders SVG/PNG/JPG previews); if
+// the CLI cannot be located or fails to start, it falls back to issuing
+// window/showDocument so the client gets a best-effort signal.
+//
+// Spawn is fire-and-forget: we Start() but do not block on Wait() in the
+// caller's goroutine — the LSP handler must return promptly. A background
+// goroutine reaps the process to avoid leaving a zombie.
+func openInZed(glspCtx *glsp.Context, sourceURI, targetPath string) {
+	cli := zedCLIPathFn()
+	if cli != "" {
+		cmd := exec.Command(cli, targetPath)
+		// exec.Command leaves Stdin/Stdout/Stderr nil by default, which
+		// means the child gets /dev/null-equivalent handles — it will not
+		// inherit the LSP's JSON-RPC stdio. Set explicitly for clarity.
+		cmd.Stdin = nil
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		if err := cmd.Start(); err == nil {
+			// Reap asynchronously so the process doesn't zombie. We do not
+			// care about the exit status.
+			go func() { _ = cmd.Wait() }()
+			return
+		} else {
+			log.Printf("d2-lsp: spawn %q failed: %v; falling back to showDocument", cli, err)
+		}
+	}
+
+	// Fallback: ask the LSP client to open it. Zed may or may not honor
+	// window/showDocument today, but this is the best we can do.
+	targetURI := pathToFileURI(targetPath)
 	takeFocus := true
 	// Issue the showDocument request asynchronously: the jsonrpc2 read
 	// loop in glsp runs handlers synchronously, so calling Call here on
 	// the same goroutine would deadlock waiting for the client's reply
 	// (the reply can't be processed until this handler returns).
 	go glspCtx.Call(protocol.ServerWindowShowDocument, protocol.ShowDocumentParams{
-		URI:       siblingURI,
+		URI:       targetURI,
 		TakeFocus: &takeFocus,
 	}, &protocol.ShowDocumentResult{})
-	return nil, nil
+}
+
+// zedCLIPath locates a usable Zed CLI binary, or returns "" if none is
+// found. The search order is:
+//  1. $ZED_CLI_DISABLE (force "no CLI" — for tests / opt-out)
+//  2. $ZED_CLI (explicit override)
+//  3. `zed` on PATH
+//  4. common macOS app bundle locations
+func zedCLIPath() string {
+	if os.Getenv("ZED_CLI_DISABLE") != "" {
+		return ""
+	}
+	if env := os.Getenv("ZED_CLI"); env != "" {
+		return env
+	}
+	if p, err := exec.LookPath("zed"); err == nil {
+		return p
+	}
+	home := os.Getenv("HOME")
+	candidates := []string{
+		"/Applications/Zed.app/Contents/MacOS/cli",
+		"/Applications/Zed Preview.app/Contents/MacOS/cli",
+		"/Applications/Zed Dev.app/Contents/MacOS/cli",
+	}
+	if home != "" {
+		candidates = append(candidates,
+			home+"/Applications/Zed.app/Contents/MacOS/cli",
+			home+"/Applications/Zed Preview.app/Contents/MacOS/cli",
+		)
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			return c
+		}
+	}
+	return ""
 }
 
 // pathToFileURI converts a filesystem path to a file:// URI suitable for
