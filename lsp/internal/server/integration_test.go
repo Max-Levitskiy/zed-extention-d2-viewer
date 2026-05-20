@@ -217,10 +217,11 @@ func render_sibling(src string) string {
 }
 
 // TestIntegrationCodeAction drives the full code-action flow: initialize,
-// didOpen, didSave (to produce the sibling SVG), then textDocument/codeAction
-// (must include "Open D2 Preview"), then workspace/executeCommand for
-// d2.openPreview, and finally assert the server sends a window/showDocument
-// request targeting the sibling SVG URI.
+// didOpen, then textDocument/codeAction (must include "Open D2 Preview"),
+// then workspace/executeCommand for d2.openPreview. The server is expected
+// to render the current in-memory text on demand, write the sibling SVG,
+// and issue a window/showDocument request targeting the sibling URI —
+// without requiring a prior didSave.
 func TestIntegrationCodeAction(t *testing.T) {
 	bin := buildBinary(t)
 	workdir := t.TempDir()
@@ -263,16 +264,9 @@ func TestIntegrationCodeAction(t *testing.T) {
 			"uri": uri, "languageId": "d2", "version": 1, "text": "hello -> world",
 		},
 	})
-	sendNotify(t, stdin, "textDocument/didSave", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-		"text":         "hello -> world",
-	})
-	// Wait until the sibling SVG exists, so the executeCommand path takes
-	// the showDocument branch (not the "save first" diagnostic branch).
-	waitForFile(t, render_sibling(src), 5*time.Second)
+	// Deliberately no didSave: the code action should render on demand
+	// using the in-memory text published via didOpen.
 
-	// Drain any in-flight notifications (publishDiagnostics) before the
-	// code action exchange.
 	send(t, stdin, "textDocument/codeAction", 2, map[string]any{
 		"textDocument": map[string]any{"uri": uri},
 		"range": map[string]any{
@@ -290,6 +284,11 @@ func TestIntegrationCodeAction(t *testing.T) {
 	cmdEntry, _ := first["command"].(map[string]any)
 	if cmdEntry == nil || cmdEntry["command"] != "d2.openPreview" {
 		t.Fatalf("expected first code action command == d2.openPreview, got %v", first)
+	}
+
+	// Sanity: sibling SVG must NOT exist yet — we never saved.
+	if _, err := os.Stat(render_sibling(src)); !os.IsNotExist(err) {
+		t.Fatalf("expected sibling SVG to be absent before code action, stat err=%v", err)
 	}
 
 	// Trigger executeCommand. The server will issue a window/showDocument
@@ -335,5 +334,11 @@ func TestIntegrationCodeAction(t *testing.T) {
 	}
 	if !sawShow {
 		t.Fatal("server never sent window/showDocument")
+	}
+
+	// The code action should have rendered + atomically written the
+	// sibling SVG on disk before issuing showDocument.
+	if _, err := os.Stat(render_sibling(src)); err != nil {
+		t.Fatalf("expected sibling SVG to exist after code action, stat err=%v", err)
 	}
 }

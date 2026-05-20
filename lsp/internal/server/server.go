@@ -6,9 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -163,7 +161,7 @@ func Run() error {
 		return handleCodeAction(params), nil
 	}
 	handler.WorkspaceExecuteCommand = func(ctx *glsp.Context, params *protocol.ExecuteCommandParams) (any, error) {
-		return handleExecuteCommand(ctx, params)
+		return handleExecuteCommand(ctx, state, params)
 	}
 
 	srv := glspserver.NewServer(&handler, lspName, false)
@@ -201,9 +199,10 @@ func handleCodeAction(params *protocol.CodeActionParams) []protocol.CodeAction {
 }
 
 // handleExecuteCommand dispatches workspace/executeCommand. For
-// "d2.openPreview" it computes the sibling SVG path and asks the client
-// to open it via window/showDocument.
-func handleExecuteCommand(glspCtx *glsp.Context, params *protocol.ExecuteCommandParams) (any, error) {
+// "d2.openPreview" it renders the current in-memory document text to a
+// sibling SVG and asks the client to open it via window/showDocument.
+// Rendering on demand means the user does not need to save first.
+func handleExecuteCommand(glspCtx *glsp.Context, state *State, params *protocol.ExecuteCommandParams) (any, error) {
 	if params.Command != commandOpenD2Preview {
 		return nil, nil
 	}
@@ -214,20 +213,44 @@ func handleExecuteCommand(glspCtx *glsp.Context, params *protocol.ExecuteCommand
 	if !ok {
 		return nil, nil
 	}
+
+	text, ok := state.Get(uri)
+	if !ok {
+		// Document not open in this server session — nothing to render.
+		return nil, nil
+	}
+
 	sourcePath, err := uriToPath(uri)
 	if err != nil {
 		publishGenericDiag(glspCtx, uri, err.Error())
 		return nil, nil
 	}
-	siblingPath := render.SiblingPath(sourcePath)
-	if _, statErr := os.Stat(siblingPath); statErr != nil {
-		if errors.Is(statErr, fs.ErrNotExist) {
-			publishGenericDiag(glspCtx, uri, "Save the file to generate the preview")
+
+	lk := state.Lock(uri)
+	lk.Lock()
+	defer lk.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), renderTimeout)
+	defer cancel()
+
+	svg, rerr := render.Render(ctx, text)
+	if rerr != nil {
+		var ce render.CompileError
+		if asCE(rerr, &ce) {
+			publishDiagnostics(glspCtx, uri, diag.FromCompileError(ce))
 			return nil, nil
 		}
-		publishGenericDiag(glspCtx, uri, "stat sibling svg: "+statErr.Error())
+		publishGenericDiag(glspCtx, uri, rerr.Error())
 		return nil, nil
 	}
+
+	siblingPath := render.SiblingPath(sourcePath)
+	if err := render.WriteSVGAtomic(siblingPath, svg); err != nil {
+		publishGenericDiag(glspCtx, uri, "svg write failed: "+err.Error())
+		return nil, nil
+	}
+	publishDiagnostics(glspCtx, uri, nil) // clear stale errors on successful render
+
 	siblingURI := pathToFileURI(siblingPath)
 	takeFocus := true
 	// Issue the showDocument request asynchronously: the jsonrpc2 read
